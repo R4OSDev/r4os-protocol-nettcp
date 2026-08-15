@@ -1,0 +1,18 @@
+# R4OS 0.58.35 protocol project manifest.
+R4OS_MODULE_MANIFEST=2
+KIND=R4P
+NAME=NETTCP
+VERSION=0.1.1
+LANGUAGE=Zig
+SOURCE=src/main.zig
+TARGET=/R4OS/PROTOCOLS/NETTCP.R4P
+IMAGE_SCOPE=slim
+IMPORT=R4DEV:Query:1
+META=r4p.name=NETTCP
+META=r4p.role=net.tcp
+META=r4p.category=net
+META=module.name=R4P_NETTCP
+META=r4p.dep=net.ipv4
+META=description=TCP client basis and segment parser
+META=feature=dispatch
+META=dependency=net.ipv4

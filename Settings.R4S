@@ -1,0 +1,9 @@
+﻿# NetTcp repository path mappings
+# Every relative value starts at this repository root, except ZIG_ROOT which
+# starts at DEVKIT_ROOT. Any value may instead be absolute. No quotes.
+
+SDK_ROOT=../../SDK
+CONTRACT_ROOT=../../Contract
+DEVKIT_ROOT=../../../DevKit
+ARTIFACTS_ROOT=../../../Artifacts/Modules/NetTcp
+ZIG_ROOT=Toolchains/Zig
