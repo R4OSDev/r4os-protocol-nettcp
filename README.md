@@ -4,13 +4,17 @@
 
 ## Package
 
-- Version: `0.1.1`
+- Version: `0.1.2`
 - Image target: `/R4OS/PROTOCOLS/NETTCP.R4P`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+For RX only, the negotiated `ProtocolBuffer` checksum-valid flag suppresses
+the duplicate TCP checksum pass. Every TX and fallback dispatch still uses
+the software verifier/builder.
 
 ## Build
 

@@ -100,7 +100,7 @@ export fn nettcp_dispatch(op: u32, in_buffer: *const r4os.abi.ProtocolBuffer, ou
         r4os.abi.tcp_op_close => close(request),
         r4os.abi.tcp_op_summary => summary(request),
         r4os.abi.tcp_op_connection_info => connectionInfo(request),
-        r4os.abi.tcp_op_handle_rx => handleRx(request),
+        r4os.abi.tcp_op_handle_rx => handleRx(request, (in_buffer.flags & r4os.abi.protocol_buffer_flag_rx_l4_checksum_valid) != 0),
         r4os.abi.tcp_op_handle_tx => handleTx(request),
         r4os.abi.tcp_op_build_segment => buildSegmentOp(request),
         else => return -4,
@@ -266,12 +266,12 @@ fn connectionInfo(op: *r4os.abi.TcpOp) void {
     op.result = 1;
 }
 
-fn handleRx(op: *r4os.abi.TcpOp) void {
+fn handleRx(op: *r4os.abi.TcpOp, l4_checksum_valid: bool) void {
     const s = state() orelse {
         op.result = r4os.abi.tcp_result_bad_state;
         return;
     };
-    inspect(op);
+    inspect(op, l4_checksum_valid);
     if (op.result != r4os.abi.tcp_result_ok) return;
     s.stats.rx_segments += 1;
     if ((op.flags & r4os.abi.tcp_flag_rst) != 0) s.stats.rst_rx += 1;
@@ -282,12 +282,12 @@ fn handleTx(op: *r4os.abi.TcpOp) void {
         op.result = r4os.abi.tcp_result_bad_state;
         return;
     };
-    inspect(op);
+    inspect(op, false);
     if (op.result != r4os.abi.tcp_result_ok) return;
     s.stats.tx_segments += 1;
 }
 
-fn inspect(op: *r4os.abi.TcpOp) void {
+fn inspect(op: *r4os.abi.TcpOp, l4_checksum_valid: bool) void {
     op.payload_len = 0;
     if (op.segment_len < HEADER_SIZE or op.segment_len > op.segment.len) {
         op.result = r4os.abi.tcp_result_short;
@@ -300,7 +300,7 @@ fn inspect(op: *r4os.abi.TcpOp) void {
         op.result = r4os.abi.tcp_result_short;
         return;
     }
-    if (checksum(op.source_ip, op.dest_ip, segment) != 0) {
+    if (!l4_checksum_valid and checksum(op.source_ip, op.dest_ip, segment) != 0) {
         if (state()) |s| s.stats.checksum_errors += 1;
         op.result = r4os.abi.tcp_result_checksum;
         return;

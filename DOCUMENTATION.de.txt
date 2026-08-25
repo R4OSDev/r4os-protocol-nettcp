@@ -2,21 +2,33 @@
 ==========
 
 Projektstruktur seit 0.51.22
---------------------------------
+----------------------------
 
 Dieses Verzeichnis ist ein eigenstaendiges R4OS-SDK-Projekt fuer NETTCP.R4P.
 
-Build:
+Build unter Windows:
 
-    cd Code\System\Protocols\NetTcp
-    ..\..\..\DevTools\Zig\zig.exe build
+    Build.bat
+
+Build unter Linux:
+
+    ./Build.sh
 
 Artefakt:
 
-    zig-out\NETTCP.R4P
+    zig-out/NETTCP.R4P
 
 Manifest:
 
     module.R4MF
 
-Image-Zielpfad: C:\R4OS\PROTOCOLS\NETTCP.R4P
+Image-Zielpfad: /R4OS/PROTOCOLS/NETTCP.R4P
+
+Ausgehandelte RX-Pruefsumme seit 0.69.50
+----------------------------------------
+
+Nur `tcp_op_handle_rx` wertet
+`ProtocolBuffer.flags.rx_l4_checksum_valid` aus. Das Flag stammt aus einer
+von Netcore angenommenen Backendfaehigkeit; dann entfaellt genau die bereits
+vom Backend erledigte TCP-Pruefung. TX, unbekannte Flags und alle
+Softwarefallbacks behalten die bisherige Verarbeitung und Fehlerzaehlung.
