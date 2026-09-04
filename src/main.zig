@@ -2,6 +2,10 @@ const r4os = @import("r4os");
 
 const IPV4_PROTOCOL: u8 = 6;
 const HEADER_SIZE: usize = 20;
+const OPTION_MSS_MASK: u32 = 0x0000_FFFF;
+const OPTION_WINDOW_SCALE_PRESENT: u32 = 1 << 16;
+const OPTION_WINDOW_SCALE_SHIFT: u5 = 17;
+const MAX_WINDOW_SCALE: u8 = 14;
 const MAX_CONNECTIONS: usize = 4;
 const BUFFER_SIZE: usize = 256;
 
@@ -289,6 +293,7 @@ fn handleTx(op: *r4os.abi.TcpOp) void {
 
 fn inspect(op: *r4os.abi.TcpOp, l4_checksum_valid: bool) void {
     op.payload_len = 0;
+    op.index = 0;
     if (op.segment_len < HEADER_SIZE or op.segment_len > op.segment.len) {
         op.result = r4os.abi.tcp_result_short;
         return;
@@ -311,6 +316,10 @@ fn inspect(op: *r4os.abi.TcpOp, l4_checksum_valid: bool) void {
     op.ack = readBe32(segment, 8);
     op.flags = @intCast(segment[13]);
     op.reserved = readBe16(segment, 14);
+    op.index = inspectOptions(segment[HEADER_SIZE..header_len]) orelse {
+        op.result = r4os.abi.tcp_result_short;
+        return;
+    };
     const payload = segment[header_len..];
     op.payload_len = @intCast(payload.len);
     if (payload.len > 0) @memcpy(op.payload[0..payload.len], payload);
@@ -323,7 +332,9 @@ fn buildSegmentOp(op: *r4os.abi.TcpOp) void {
         return;
     }
     const payload_len: usize = @intCast(op.payload_len);
-    const len = HEADER_SIZE + payload_len;
+    const option_len: usize = if ((op.flags & r4os.abi.tcp_flag_syn) != 0) optionLength(op.index) else 0;
+    const header_len = HEADER_SIZE + option_len;
+    const len = header_len + payload_len;
     if (len > 0xFFFF or len > op.segment.len) {
         op.result = r4os.abi.tcp_result_buffer_small;
         return;
@@ -334,14 +345,70 @@ fn buildSegmentOp(op: *r4os.abi.TcpOp) void {
     writeBe16(op.segment[0..], 2, op.dest_port);
     writeBe32(op.segment[0..], 4, op.seq);
     writeBe32(op.segment[0..], 8, op.ack);
-    op.segment[12] = 5 << 4;
+    op.segment[12] = @as(u8, @intCast(header_len / 4)) << 4;
     op.segment[13] = @intCast(op.flags & 0x3F);
     writeBe16(op.segment[0..], 14, op.reserved);
+    writeOptions(op.segment[HEADER_SIZE..header_len], op.index);
     i = 0;
-    while (i < payload_len) : (i += 1) op.segment[HEADER_SIZE + i] = op.payload[i];
+    while (i < payload_len) : (i += 1) op.segment[header_len + i] = op.payload[i];
     writeBe16(op.segment[0..], 16, checksum(op.source_ip, op.dest_ip, op.segment[0..len]));
     op.segment_len = @intCast(len);
     op.result = r4os.abi.tcp_result_ok;
+}
+
+fn inspectOptions(options: []const u8) ?u32 {
+    var metadata: u32 = 0;
+    var offset: usize = 0;
+    while (offset < options.len) {
+        const kind = options[offset];
+        if (kind == 0) break; // End of option list.
+        if (kind == 1) { // NOP.
+            offset += 1;
+            continue;
+        }
+        if (offset + 1 >= options.len) return null;
+        const length: usize = options[offset + 1];
+        if (length < 2 or offset + length > options.len) return null;
+        switch (kind) {
+            2 => if (length == 4) {
+                const mss = readBe16(options, offset + 2);
+                if (mss != 0) metadata = (metadata & ~OPTION_MSS_MASK) | mss;
+            },
+            3 => if (length == 3) {
+                const scale = @min(options[offset + 2], MAX_WINDOW_SCALE);
+                metadata |= OPTION_WINDOW_SCALE_PRESENT;
+                metadata &= ~(@as(u32, 0x0F) << OPTION_WINDOW_SCALE_SHIFT);
+                metadata |= @as(u32, scale) << OPTION_WINDOW_SCALE_SHIFT;
+            },
+            else => {},
+        }
+        offset += length;
+    }
+    return metadata;
+}
+
+fn optionLength(metadata: u32) usize {
+    var length: usize = 0;
+    if ((metadata & OPTION_MSS_MASK) != 0) length += 4;
+    if ((metadata & OPTION_WINDOW_SCALE_PRESENT) != 0) length += 4; // NOP + WS(3).
+    return length;
+}
+
+fn writeOptions(out: []u8, metadata: u32) void {
+    var offset: usize = 0;
+    const mss: u16 = @truncate(metadata & OPTION_MSS_MASK);
+    if (mss != 0) {
+        out[offset] = 2;
+        out[offset + 1] = 4;
+        writeBe16(out, offset + 2, mss);
+        offset += 4;
+    }
+    if ((metadata & OPTION_WINDOW_SCALE_PRESENT) != 0) {
+        out[offset] = 1;
+        out[offset + 1] = 3;
+        out[offset + 2] = 3;
+        out[offset + 3] = @truncate((metadata >> OPTION_WINDOW_SCALE_SHIFT) & 0x0F);
+    }
 }
 
 fn requestFromBuffer(buffer: *const r4os.abi.ProtocolBuffer) ?*r4os.abi.TcpOp {
