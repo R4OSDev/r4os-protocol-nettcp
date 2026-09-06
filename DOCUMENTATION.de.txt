@@ -16,7 +16,7 @@ Build unter Linux:
 
 Artefakt:
 
-    zig-out/NETTCP.R4P
+    Artifacts/Modules/NetTcp/NETTCP.R4P
 
 Manifest:
 
