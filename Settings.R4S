@@ -7,3 +7,5 @@ CONTRACT_ROOT=../../Contract
 DEVKIT_ROOT=../../../DevKit
 ARTIFACTS_ROOT=../../../Artifacts/Modules/NetTcp
 ZIG_ROOT=Toolchains/Zig
+
+LIBRARIES_ROOT=../../Libraries
