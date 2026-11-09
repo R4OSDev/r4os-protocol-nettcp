@@ -1,4 +1,5 @@
 const r4os = @import("r4os");
+const ipv6 = @import("tcp6.zig");
 
 const IPV4_PROTOCOL: u8 = 6;
 const HEADER_SIZE: usize = 20;
@@ -52,34 +53,40 @@ const RuntimeState = struct {
     next_port: u16 = 49152,
 };
 
-var api_addr: usize = 1;
+var api_view: ?r4os.technical2.Protocol = null;
 var state_addr: usize = 1;
 
 comptime {
-    asm (r4os.r4dev.protocolEntriesAsm("nettcp_init", "nettcp_shutdown", "nettcp_query", "nettcp_dispatch"));
+    asm (r4os.technical2.protocolEntriesAsm("nettcp_init", "nettcp_shutdown", "nettcp_query", "nettcp_dispatch"));
 }
 
-export fn nettcp_init(api: *const r4os.r4dev.ProtocolApi) callconv(.c) i32 {
-    var ctx = r4os.r4dev.ProtocolContext.init(api);
-    api_addr = @intFromPtr(api);
-    const memory = ctx.alloc(@sizeOf(RuntimeState), @alignOf(RuntimeState)) orelse {
-        ctx.logError("NETTCP.R4P state allocation failed");
+export fn nettcp_init(api: *const r4os.abi.ProtocolApi2) callconv(.c) i32 {
+    const view = r4os.technical2.Protocol.init(api) orelse return r4os.abi.network_error_backend;
+    ipv6.init(api) catch |err| return r4os.network_transport.common.code(err);
+    const memory = view.function("alloc").?(@sizeOf(RuntimeState), @alignOf(RuntimeState)) orelse {
+        ipv6.stop();
         return -1;
     };
     state_addr = @intFromPtr(memory);
+    api_view = view;
     reset();
-    ctx.logInfo("NETTCP.R4P init");
-    _ = ctx.registerRole("net.tcp", .net, 0);
-    _ = ctx.setStatus(.active, "TCP R4P active");
-    return 0;
+    if (view.function("register_role").?("net.tcp", @intFromEnum(r4os.abi.ProtocolCategory.net), 0) != 0) {
+        view.function("free").?(memory, @sizeOf(RuntimeState));
+        state_addr = 1;
+        api_view = null;
+        ipv6.stop();
+        return -1;
+    }
+    return view.function("set_status").?(@intFromEnum(r4os.abi.ProtocolState.active), "TCP IPv4 codec and real external IPv6 transport");
 }
 
 export fn nettcp_shutdown() callconv(.c) i32 {
-    if (context()) |ctx| {
-        if (state_addr > 1) ctx.free(@ptrFromInt(state_addr), @sizeOf(RuntimeState));
+    if (api_view) |view| {
+        if (state_addr > 1) view.function("free").?(@ptrFromInt(state_addr), @sizeOf(RuntimeState));
     }
+    ipv6.stop();
     state_addr = 1;
-    api_addr = 1;
+    api_view = null;
     return 0;
 }
 
@@ -95,7 +102,7 @@ export fn nettcp_query(out: *r4os.abi.ProtocolStatus) callconv(.c) i32 {
 }
 
 export fn nettcp_dispatch(op: u32, in_buffer: *const r4os.abi.ProtocolBuffer, out_buffer: *r4os.abi.ProtocolBuffer) callconv(.c) i32 {
-    _ = out_buffer;
+    if (op >= r4os.abi.network_op_info) return ipv6.dispatch(op, in_buffer, out_buffer);
     const request = requestFromBuffer(in_buffer) orelse return -2;
     switch (op) {
         r4os.abi.tcp_op_connect => connect(request),
@@ -115,11 +122,6 @@ export fn nettcp_dispatch(op: u32, in_buffer: *const r4os.abi.ProtocolBuffer, ou
 fn reset() void {
     const s = state() orelse return;
     s.* = .{};
-}
-
-fn context() ?r4os.r4dev.ProtocolContext {
-    if (api_addr <= 1) return null;
-    return r4os.r4dev.ProtocolContext.init(@ptrFromInt(api_addr));
 }
 
 fn state() ?*RuntimeState {
