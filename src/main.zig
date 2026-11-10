@@ -57,27 +57,35 @@ var api_view: ?r4os.technical2.Protocol = null;
 var state_addr: usize = 1;
 
 comptime {
-    asm (r4os.technical2.protocolEntriesAsm("nettcp_init", "nettcp_shutdown", "nettcp_query", "nettcp_dispatch"));
+    if (!@import("builtin").is_test) asm (r4os.technical2.protocolEntriesAsm("nettcp_init", "nettcp_shutdown", "nettcp_query", "nettcp_dispatch"));
 }
 
 export fn nettcp_init(api: *const r4os.abi.ProtocolApi2) callconv(.c) i32 {
     const view = r4os.technical2.Protocol.init(api) orelse return r4os.abi.network_error_backend;
+    const allocate = view.function("alloc") orelse return r4os.abi.err_no_fn;
+    const release = view.function("free") orelse return r4os.abi.err_no_fn;
+    const register = view.function("register_role") orelse return r4os.abi.err_no_fn;
+    const status = view.function("set_status") orelse return r4os.abi.err_no_fn;
     ipv6.init(api) catch |err| return r4os.network_transport.common.code(err);
-    const memory = view.function("alloc").?(@sizeOf(RuntimeState), @alignOf(RuntimeState)) orelse {
+    const memory = allocate(@sizeOf(RuntimeState), @alignOf(RuntimeState)) orelse {
         ipv6.stop();
         return -1;
+    };
+    var published = false;
+    defer if (!published) {
+        release(memory, @sizeOf(RuntimeState));
+        state_addr = 1;
+        api_view = null;
+        ipv6.stop();
     };
     state_addr = @intFromPtr(memory);
     api_view = view;
     reset();
-    if (view.function("register_role").?("net.tcp", @intFromEnum(r4os.abi.ProtocolCategory.net), 0) != 0) {
-        view.function("free").?(memory, @sizeOf(RuntimeState));
-        state_addr = 1;
-        api_view = null;
-        ipv6.stop();
-        return -1;
-    }
-    return view.function("set_status").?(@intFromEnum(r4os.abi.ProtocolState.active), "TCP IPv4 codec and real external IPv6 transport");
+    if (register("net.tcp", @intFromEnum(r4os.abi.ProtocolCategory.net), 0) != 0) return -1;
+    const result = status(@intFromEnum(r4os.abi.ProtocolState.active), "TCP IPv4 codec and real external IPv6 transport");
+    if (result != 0) return result;
+    published = true;
+    return 0;
 }
 
 export fn nettcp_shutdown() callconv(.c) i32 {
@@ -414,9 +422,14 @@ fn writeOptions(out: []u8, metadata: u32) void {
 }
 
 fn requestFromBuffer(buffer: *const r4os.abi.ProtocolBuffer) ?*r4os.abi.TcpOp {
-    if (buffer.data == null) return null;
-    if (buffer.len < @sizeOf(r4os.abi.TcpOp)) return null;
-    return @ptrCast(@alignCast(buffer.data.?));
+    const native = r4os.native_protocol_view;
+    var policy = native.Policy.record(r4os.abi.TcpOp, .inout, .prefix);
+    // This flag only admits the existing trusted RX metadata; the operation
+    // still decides whether it may skip its wire checksum. TX never does.
+    policy.allowed_flags = r4os.abi.protocol_buffer_flag_rx_l4_checksum_valid;
+    var metadata = buffer.*;
+    const view = native.InOut(r4os.abi.TcpOp).init(&metadata, policy) catch return null;
+    return view.value;
 }
 
 fn allocConnection(s: *RuntimeState) ?usize {
@@ -444,46 +457,152 @@ fn activeCount(s: *RuntimeState) u32 {
 }
 
 fn checksum(source_ip: [4]u8, dest_ip: [4]u8, segment: []const u8) u16 {
-    var sum: u32 = 0;
-    sum = addIp(sum, source_ip);
-    sum = addIp(sum, dest_ip);
-    sum += IPV4_PROTOCOL;
-    sum += @intCast(segment.len);
-    var i: usize = 0;
-    while (i + 1 < segment.len) : (i += 2) {
-        sum += (@as(u32, segment[i]) << 8) | segment[i + 1];
-    }
-    if (i < segment.len) sum += @as(u32, segment[i]) << 8;
-    while ((sum >> 16) != 0) sum = (sum & 0xFFFF) + (sum >> 16);
-    return @intCast(~sum & 0xFFFF);
-}
-
-fn addIp(sum_in: u32, ip: [4]u8) u32 {
-    return sum_in + (@as(u32, ip[0]) << 8 | ip[1]) + (@as(u32, ip[2]) << 8 | ip[3]);
+    // The protocol retains pseudoheader composition and UDP zero policy.
+    var header: [4]u8 = .{ 0, IPV4_PROTOCOL, 0, 0 };
+    var writer = r4os.binary_cursor.Writer.init(&header) catch unreachable;
+    writer.position = 2;
+    writer.writeInt(u16, @intCast(segment.len), .big) catch unreachable;
+    var value: r4os.internet_checksum.Checksum16 = .{};
+    value.add(&source_ip) catch unreachable;
+    value.add(&dest_ip) catch unreachable;
+    value.add(&header) catch unreachable;
+    value.add(segment) catch unreachable;
+    return value.finish() catch unreachable;
 }
 
 fn readBe16(buf: []const u8, offset: usize) u16 {
-    return (@as(u16, buf[offset]) << 8) | buf[offset + 1];
+    var reader = r4os.binary_cursor.Reader.init(buf) catch unreachable;
+    _ = reader.take(offset) catch unreachable;
+    return reader.readInt(u16, .big) catch unreachable;
 }
 
 fn readBe32(buf: []const u8, offset: usize) u32 {
-    return (@as(u32, buf[offset]) << 24) | (@as(u32, buf[offset + 1]) << 16) | (@as(u32, buf[offset + 2]) << 8) | buf[offset + 3];
+    var reader = r4os.binary_cursor.Reader.init(buf) catch unreachable;
+    _ = reader.take(offset) catch unreachable;
+    return reader.readInt(u32, .big) catch unreachable;
 }
 
 fn writeBe16(buf: []u8, offset: usize, value: u16) void {
-    buf[offset] = @intCast(value >> 8);
-    buf[offset + 1] = @intCast(value & 0xFF);
+    var writer = r4os.binary_cursor.Writer.init(buf) catch unreachable;
+    writer.position = offset;
+    writer.writeInt(u16, value, .big) catch unreachable;
 }
 
 fn writeBe32(buf: []u8, offset: usize, value: u32) void {
-    buf[offset] = @intCast(value >> 24);
-    buf[offset + 1] = @intCast((value >> 16) & 0xFF);
-    buf[offset + 2] = @intCast((value >> 8) & 0xFF);
-    buf[offset + 3] = @intCast(value & 0xFF);
+    var writer = r4os.binary_cursor.Writer.init(buf) catch unreachable;
+    writer.position = offset;
+    writer.writeInt(u32, value, .big) catch unreachable;
 }
 
 fn note(comptime text: []const u8) [64]u8 {
     var out: [64]u8 = .{0} ** 64;
     @memcpy(out[0..text.len], text);
     return out;
+}
+
+test "TCP provider publication failure retires both exact allocations; original wire flags stay scoped" {
+    const std = @import("std");
+    const a = r4os.abi;
+    const Owner = struct {
+        var memory: [2][524288]u8 align(64) = undefined;
+        var bytes: [2]u32 = .{ 0, 0 };
+        var live: [2]bool = .{ false, false };
+        var allocated: usize = 0;
+        var released: usize = 0;
+        var registered: usize = 0;
+        var statuses: usize = 0;
+        var mode: u8 = 0;
+        var bad: bool = false;
+        fn clear(next_mode: u8) void {
+            bytes = .{ 0, 0 };
+            live = .{ false, false };
+            allocated = 0;
+            released = 0;
+            registered = 0;
+            statuses = 0;
+            bad = false;
+            mode = next_mode;
+        }
+        fn alloc(length: u32, alignment: u32) callconv(.c) ?*anyopaque {
+            const index = allocated;
+            allocated += 1;
+            if (index >= 2 or length > memory[0].len or alignment > 64) {
+                bad = true;
+                return null;
+            }
+            if (mode == 3 and index == 1) return null;
+            bytes[index] = length;
+            live[index] = true;
+            return &memory[index];
+        }
+        fn free(pointer: ?*anyopaque, length: u32) callconv(.c) void {
+            for (0..2) |index| {
+                if (pointer != @as(*anyopaque, @ptrCast(&memory[index]))) continue;
+                if (!live[index] or bytes[index] != length) bad = true;
+                live[index] = false;
+                released += 1;
+                return;
+            }
+            bad = true;
+        }
+        fn register(_: [*:0]const u8, _: u32, _: u32) callconv(.c) i32 {
+            registered += 1;
+            return if (mode == 1) -42 else 0;
+        }
+        fn status(_: u32, _: [*:0]const u8) callconv(.c) i32 {
+            statuses += 1;
+            return if (mode == 2) -43 else 0;
+        }
+    };
+    var raw: a.ProtocolApi2 = undefined;
+    @memset(std.mem.asBytes(&raw), 0);
+    raw.magic = r4os.technical2.abi.protocol_magic;
+    raw.version = r4os.technical2.abi.protocol_version;
+    raw.size = @sizeOf(a.ProtocolApi2);
+    Owner.clear(0);
+    try std.testing.expectEqual(a.err_no_fn, nettcp_init(&raw));
+    try std.testing.expectEqual(@as(usize, 0), Owner.allocated);
+    raw.alloc = Owner.alloc;
+    raw.free = Owner.free;
+    raw.register_role = Owner.register;
+    raw.set_status = Owner.status;
+    raw.protocol_dispatch = @ptrFromInt(8);
+    raw.link_io = @ptrFromInt(8);
+    raw.process_status = @ptrFromInt(8);
+    raw.entropy_fill = @ptrFromInt(8);
+    for ([_]u8{ 1, 2, 3, 0 }) |mode| {
+        Owner.clear(mode);
+        const code = nettcp_init(&raw);
+        try std.testing.expectEqual(@as(i32, switch (mode) {
+            1, 3 => -1,
+            2 => -43,
+            else => 0,
+        }), code);
+        if (mode == 0) {
+            try std.testing.expect(state() != null and Owner.live[0] and Owner.live[1]);
+            try std.testing.expectEqual(@as(i32, 0), nettcp_shutdown());
+            try std.testing.expectEqual(@as(i32, 0), nettcp_shutdown());
+        }
+        try std.testing.expect(state() == null and !Owner.live[0] and !Owner.live[1] and !Owner.bad);
+        try std.testing.expectEqual(@as(usize, if (mode == 3) 1 else 2), Owner.released);
+        try std.testing.expectEqual(@as(usize, if (mode == 3) 0 else 1), Owner.registered);
+        try std.testing.expectEqual(@as(usize, if (mode == 1 or mode == 3) 0 else 1), Owner.statuses);
+    }
+    Owner.clear(0);
+    try std.testing.expectEqual(@as(i32, 0), nettcp_init(&raw));
+    defer _ = nettcp_shutdown();
+    var op: a.TcpOp = .{ .segment_len = 20 };
+    op.segment[12] = 0x50;
+    // Deliberately corrupt wire checksum: only the pre-existing trusted RX
+    // flag may bypass verification. No output or TX operation acquires it.
+    var input: a.ProtocolBuffer = .{ .data = &op, .len = @sizeOf(a.TcpOp), .capacity = @sizeOf(a.TcpOp) };
+    var output: a.ProtocolBuffer = .{};
+    try std.testing.expectEqual(a.tcp_result_checksum, nettcp_dispatch(a.tcp_op_handle_rx, &input, &output));
+    input.flags = a.protocol_buffer_flag_rx_l4_checksum_valid;
+    try std.testing.expectEqual(a.tcp_result_ok, nettcp_dispatch(a.tcp_op_handle_rx, &input, &output));
+    try std.testing.expectEqual(a.tcp_result_checksum, nettcp_dispatch(a.tcp_op_handle_tx, &input, &output));
+    input.flags |= 0x80000000;
+    const before = std.mem.asBytes(&op).*;
+    try std.testing.expectEqual(@as(i32, -2), nettcp_dispatch(a.tcp_op_handle_rx, &input, &output));
+    try std.testing.expectEqualSlices(u8, &before, std.mem.asBytes(&op));
 }

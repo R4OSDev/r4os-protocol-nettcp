@@ -1,12 +1,12 @@
 .{
     .name = .r4os_protocol_nettcp,
-    .version = "0.1.4",
+    .version = "0.1.5",
     .fingerprint = 0x576f2faa821c797b,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .r4os_sdk = .{
-            .url = "https://github.com/R4OSDev/r4os-sdk/archive/eb4b43b2205ea942d926893bee9733c867f7e95b.tar.gz",
-            .hash = "r4os_sdk-0.64.176-NnPzAjBu_gGPhyVGoIrr7fTmpR7VvDWv2kC4qTpQx9wv",
+            .url = "https://github.com/R4OSDev/r4os-sdk/archive/5671b093aed38a48512fa7db9744867afc3cbead.tar.gz",
+            .hash = "r4os_sdk-0.64.195-NnPzAhxECwIILYHoxpyVtE55kUOMBVozguPW_m6Az0b7",
         },
     },
     .paths = .{

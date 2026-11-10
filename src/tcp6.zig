@@ -75,10 +75,14 @@ fn before(x: u32, y: u32) bool {
     return @as(i32, @bitCast(x -% y)) < 0;
 }
 fn read32(bytes: []const u8, offset: usize) u32 {
-    return std.mem.readInt(u32, bytes[offset..][0..4], .big);
+    var reader = sdk.binary_cursor.Reader.init(bytes) catch unreachable;
+    _ = reader.take(offset) catch unreachable;
+    return reader.readInt(u32, .big) catch unreachable;
 }
 fn write32(bytes: []u8, offset: usize, value: u32) void {
-    std.mem.writeInt(u32, bytes[offset..][0..4], value, .big);
+    var writer = sdk.binary_cursor.Writer.init(bytes) catch unreachable;
+    writer.position = offset;
+    writer.writeInt(u32, value, .big) catch unreachable;
 }
 const Segment = struct {
     source: u16,
@@ -552,13 +556,19 @@ fn dispatchInner(op: u32, input: *const a.ProtocolBuffer, output: *a.ProtocolBuf
         } else |err| if (err != error.NotFound and err != error.UnsupportedPolicy) return err;
         return t.put(a.NetworkProviderInfo, &info, "", output);
     }
+    const native = sdk.native_protocol_view;
+    var input_policy = native.Policy.versioned(a.NetworkTransportRequest, 1, .input, .prefix);
+    input_policy.alignment = 1; // the existing copied header + payload transport
+    _ = native.admit(input, input_policy, .input) catch return error.Invalid;
     const value = try r.decodeRequest(input, output);
     const req = value.request;
     if (req.flags != 0) return error.UnsupportedPolicy;
     const writing = op == a.network_op_write;
     if (input.len != @sizeOf(a.NetworkTransportRequest) + @as(usize, if (writing) req.bytes else 0)) return error.Invalid;
     if (!writing and op != a.network_op_read and req.bytes != 0) return error.Invalid;
-    if (output.data == null or output.capacity < @sizeOf(a.NetworkSocketResult)) return error.Capacity;
+    var output_policy = native.Policy.record(a.NetworkSocketResult, .output, .prefix);
+    output_policy.alignment = 1;
+    _ = native.admit(output, output_policy, .output) catch return error.Capacity;
     if (op == a.network_transport_op_tick) {
         if (req.socket != 0 or req.generation != 0) return error.Invalid;
         try tick(r);
